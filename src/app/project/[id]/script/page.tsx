@@ -23,6 +23,10 @@ import { useT, useLocale } from "@/lib/i18n";
 import { STAGE_LABEL_KEYS } from "@/lib/pipeline-stages";
 import { friendlyError } from "@/lib/friendly-error";
 import { ProjectHeader } from "@/components/project-header";
+import { ScriptGenerationProgressPanel } from "@/components/script-generation-progress";
+import { useScriptGeneration } from "@/lib/use-script-generation";
+import { ScriptSellingPoints } from "@/components/script-selling-points";
+import type { SellingPointPlan } from "@/lib/script-engine/selling-points";
 
 // shot type labels (label changed to i18n key, resolved per locale at render time)
 const shotTypeLabels: Record<Shot["type"], { labelKey: string; color: string }> = {
@@ -44,6 +48,7 @@ const styleLabelKeys: Record<string, string> = {
 
 // structure of a script row returned from the backend scripts table
 interface DbScript {
+  sellingPointPlan?: SellingPointPlan | null;
   id: string;
   title: string | null;
   styleType: string;
@@ -60,7 +65,7 @@ export default function ScriptPage() {
   const router = useRouter();
   const [selectedScript, setSelectedScript] = useState(0);
   const [scripts, setScripts] = useState<
-    { id: string; title: string; styleType: string; totalDuration: number; shots: Shot[] }[]
+    { id: string; title: string; styleType: string; totalDuration: number; shots: Shot[]; sellingPointPlan?: SellingPointPlan | null }[]
   >([]);
   const [loading, setLoading] = useState(true);
   const [projectName, setProjectName] = useState("");
@@ -77,6 +82,7 @@ export default function ScriptPage() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [genError, setGenError] = useState("");
   const { llm } = useSettingsStore();
+  const scriptGeneration = useScriptGeneration(llm.model);
   // beginner/director split: simple mode swaps the 3-column editor for a read-and-go card
   const spendCapUsd = useSettingsStore((st) => st.spendCapUsd);
   const uiMode = useSettingsStore((st) => st.uiMode);
@@ -118,6 +124,7 @@ export default function ScriptPage() {
             styleType: s.styleType,
             totalDuration: s.totalDuration ?? 0,
             shots: s.shots ?? [],
+            sellingPointPlan: s.sellingPointPlan,
           }))
         );
         const selIdx = dbScripts.findIndex((s) => s.selected);
@@ -171,7 +178,7 @@ export default function ScriptPage() {
               visionModel: llm.visionModel,
             },
           };
-      const res = await fetch(endpoint, {
+      const res = await scriptGeneration.request(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -222,6 +229,7 @@ export default function ScriptPage() {
               styleType: s.styleType,
               totalDuration: s.totalDuration ?? 0,
               shots: s.shots ?? [],
+              sellingPointPlan: s.sellingPointPlan,
             }))
           );
           // default to the script marked as selected
@@ -812,15 +820,16 @@ export default function ScriptPage() {
     return (
       <div className="min-h-screen grid-bg">
         {headerBar}
-        <div className="mx-auto max-w-md flex flex-col items-center justify-center py-28 px-6 text-center">
+        <div className={`mx-auto flex flex-col items-center justify-center px-6 text-center ${scriptGeneration.progress ? "max-w-2xl py-10" : "max-w-md py-28"}`}>
           <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-muted/40 mb-5">
             <LuWand className="w-8 h-8 text-muted-foreground" />
           </div>
-          <h2 className="text-lg font-semibold mb-2">{t("emptyTitle")}</h2>
+          <h2 className="text-lg font-semibold mb-2">{t(isGenerating ? "generatingTitle" : "emptyTitle")}</h2>
           <p className="text-sm text-muted-foreground mb-6">
-            {t("emptyDesc", { name: projectName || t("emptyDescThisProject") })}
+            {t(isGenerating ? "generatingDesc" : "emptyDesc", { name: projectName || t("emptyDescThisProject") })}
           </p>
-          {genError && (
+          {scriptGeneration.progress && <div className="mb-6 w-full"><ScriptGenerationProgressPanel progress={scriptGeneration.progress} /></div>}
+          {genError && !scriptGeneration.progress?.error && (
             <div className="mb-4 flex flex-col items-center gap-2">
               <p className="text-sm text-destructive">{genError}</p>
               {/* most generation errors are LLM-config related — offer a direct jump to Settings */}
@@ -998,6 +1007,11 @@ export default function ScriptPage() {
                 {t("pipelineRestart")}
               </Button>
             </div>
+          </div>
+        )}
+        {projectMeta?.contentType === "product" && currentScript && (
+          <div className={`mb-6 ${uiMode === "simple" ? "mx-auto max-w-2xl" : ""}`}>
+            <ScriptSellingPoints plan={currentScript.sellingPointPlan} shots={currentScript.shots} />
           </div>
         )}
         {uiMode === "simple" ? (

@@ -26,7 +26,9 @@ export const script: NamespaceMessages = {
     // 加载/空态
     loadingScripts: "正在加载脚本...",
     emptyTitle: "还没有生成脚本",
-    emptyDesc: "「{name}」尚未生成脚本，或上次生成失败。点击下方按钮，AI 将根据你的商品信息重新生成。",
+    generatingTitle: "正在生成脚本",
+    generatingDesc: "项目「{name}」的执行进度和脚本内容会实时显示在下方。",
+    emptyDesc: "项目「{name}」尚未生成脚本，或上次生成失败。点击下方按钮，AI 将根据项目信息重新生成。",
     emptyDescThisProject: "该项目",
     generateScript: "生成脚本",
     backToProjects: "返回项目列表",
@@ -167,7 +169,9 @@ export const script: NamespaceMessages = {
     // 加载/空态
     loadingScripts: "Loading scripts...",
     emptyTitle: "No script yet",
-    emptyDesc: "“{name}” has no script yet, or the last run failed. Click below and AI will regenerate one from your product info.",
+    generatingTitle: "Generating your script",
+    generatingDesc: "Live progress and script text for project “{name}” appear below.",
+    emptyDesc: "Project “{name}” has no script yet, or the last run failed. Click below and AI will regenerate one from your project info.",
     emptyDescThisProject: "this project",
     generateScript: "Generate script",
     backToProjects: "Back to projects",

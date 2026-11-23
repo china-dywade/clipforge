@@ -76,8 +76,12 @@ async function rebuildBetterSqlite3ForElectron() {
     .toString()
     .trim();
 
-  const plat = process.platform; // darwin / win32 / linux
-  const arch = process.arch; // arm64 / x64 / ia32
+  // Cross-packaging must use the target OS/architecture, not the build machine's.
+  const plat = process.env.CLIPFORGE_TARGET_PLATFORM || process.platform;
+  const arch = process.env.CLIPFORGE_TARGET_ARCH || process.arch;
+  if (!["darwin", "win32", "linux"].includes(plat) || !["arm64", "x64", "ia32"].includes(arch)) {
+    throw new Error(`Unsupported desktop target: ${plat}/${arch}`);
+  }
   const asset = `better-sqlite3-v${bsVer}-electron-v${abi}-${plat}-${arch}.tar.gz`;
   const url = `https://github.com/WiseLibs/better-sqlite3/releases/download/v${bsVer}/${asset}`;
   console.log(`重建 standalone better-sqlite3 → Electron ABI ${abi}：${asset}`);

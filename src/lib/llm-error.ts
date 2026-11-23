@@ -18,7 +18,7 @@
  */
 
 import OpenAI, { APIConnectionError, APIConnectionTimeoutError } from "openai";
-import { listModels, modelListHint, normalizeChatBase } from "@/lib/llm-models";
+import { isOllama, listModels, modelListHint, normalizeChatBase } from "@/lib/llm-models";
 
 /** Endpoint + model a call was aimed at (used to tailor the hint). */
 export interface LLMTarget {
@@ -164,11 +164,11 @@ export function jsonModeParams(baseUrl?: string): { response_format?: { type: "j
  * Request params that are OUR optimization, not the user's intent: when a provider rejects the
  * request and blames one of these by name, replaying without it is always the right call.
  */
-const OPTIONAL_PARAMS = ["response_format", "enable_thinking", "thinking", "reasoning_effort"] as const;
+const OPTIONAL_PARAMS = ["response_format", "enable_thinking", "thinking", "reasoning_effort", "temperature"] as const;
 
 /**
  * fetch wrapper that replays a request once without optional params a provider rejected by name.
- * We attach best-effort fields (JSON mode, thinking toggles) keyed off baseUrl patterns, but a
+ * We attach best-effort fields (JSON mode, thinking toggles, sampling temperature), but a
  * baseUrl cannot know every model served behind it — e.g. a provider that supports
  * `response_format` on chat models 400s on its audio-adjacent ones. The error text names the
  * offending field; dropping exactly the blamed fields keeps the user's request alive.
@@ -341,8 +341,12 @@ export function explainLLMError(err: unknown, target: LLMTarget = {}): { zh: str
   }
   if (err instanceof APIConnectionError) {
     return withCtx({
-      zh: "连不上这个 API 地址：请检查网络/代理是否可访问该域名；本地 Ollama 需先启动服务（ollama serve）",
-      en: "Cannot reach the API endpoint: check network/proxy access to this host; a local Ollama needs `ollama serve` running",
+      zh: isOllama(baseUrl)
+        ? "连不上本地 Ollama：请确认已启动服务（ollama serve），并检查 API 地址"
+        : "与模型接口的连接失败：请检查运行 ClipForge 的服务端网络/代理，稍后重试",
+      en: isOllama(baseUrl)
+        ? "Cannot reach Ollama: make sure `ollama serve` is running and check the API endpoint"
+        : "Connection to the model API failed: check network/proxy access on the ClipForge server and retry shortly",
     });
   }
   return withCtx(explainLLMStatus(status, { ...target, detail: full }));

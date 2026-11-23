@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { LuSparkles, LuCircleAlert, LuLoaderCircle, LuWandSparkles } from "react-icons/lu";
 import { useSettingsStore } from "@/lib/stores/settings-store";
+import { ScriptGenerationProgressPanel } from "@/components/script-generation-progress";
+import { useScriptGeneration } from "@/lib/use-script-generation";
 import { useT } from "@/lib/i18n";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -36,6 +38,7 @@ export default function TopicProjectPage() {
   const t = useT("topic");
   const router = useRouter();
   const { llm } = useSettingsStore();
+  const scriptGeneration = useScriptGeneration(llm.model);
   const isLLMConfigured = llm.apiKey.length > 0;
 
   const [topic, setTopic] = useState("");
@@ -56,7 +59,7 @@ export default function TopicProjectPage() {
     setIsSubmitting(true);
     setError(null);
     try {
-      const res = await fetch("/api/topic/script", {
+      const res = await scriptGeneration.request("/api/topic/script", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -72,11 +75,7 @@ export default function TopicProjectPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        // even on failure, the backend may have created a draft project and returned a projectId so the user can retry after navigating
-        if (data.projectId) {
-          router.push(`/project/${data.projectId}/script`);
-          return;
-        }
+        // Keep the execution log visible; the progress panel links to the saved draft for retry.
         throw new Error(data.error || t("errorGenerateCheckLlm"));
       }
       // success: navigate to the script page to review multiple options, then proceed through auto-fill assets → compose
@@ -198,13 +197,14 @@ export default function TopicProjectPage() {
             </div>
 
             {/* error message */}
-            {error && (
+            {error && !scriptGeneration.progress?.error && (
               <div className="flex items-start gap-2 rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">
                 <LuCircleAlert className="w-4 h-4 shrink-0 mt-0.5" />
                 <span>{error}</span>
               </div>
             )}
 
+            <ScriptGenerationProgressPanel progress={scriptGeneration.progress} />
             {/* generate button */}
             <Button
               onClick={handleGenerate}

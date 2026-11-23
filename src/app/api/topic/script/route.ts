@@ -6,6 +6,8 @@ import { scripts as scriptsTable, projects } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 import { apiError, errText } from "@/lib/api-error";
 import { llmErrorPair } from "@/lib/llm-error";
+import { scriptProgressResponse } from "@/lib/script-progress-server";
+import type { ScriptProgressContext } from "@/lib/script-progress";
 
 const VALID_NARRATION = new Set<TopicNarrationStyle>([
   "knowledge",
@@ -29,6 +31,10 @@ function topicToName(topic: string): string {
  * body: { topic, narrationStyle?, targetDuration?, count?, platforms?, projectId?, llmConfig }
  */
 export async function POST(req: NextRequest) {
+  return scriptProgressResponse(req, (progress) => generate(req, progress));
+}
+
+async function generate(req: NextRequest, progress?: ScriptProgressContext) {
   let body: Record<string, unknown>;
   try {
     body = await req.json();
@@ -91,7 +97,7 @@ export async function POST(req: NextRequest) {
       count,
       platforms,
       llmConfig: llmConfig as { baseUrl: string; apiKey: string; model: string },
-    });
+    }, progress);
   } catch (error) {
     // LLM failures carry an actionable bilingual message (bad key / dead free endpoint / rate limit)
     const { zh, en } = llmErrorPair(error);
@@ -102,6 +108,8 @@ export async function POST(req: NextRequest) {
   // persist to DB: delete old scripts → insert new ones → select first by default → update project status to scripting
   let savedScripts = generated;
   try {
+    progress?.signal.throwIfAborted();
+    progress?.emit({ type: "stage", stage: "saving" });
     await db.delete(scriptsTable).where(eq(scriptsTable.projectId, projectId));
     const rows = await db
       .insert(scriptsTable)

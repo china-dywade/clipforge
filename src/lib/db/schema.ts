@@ -1,4 +1,5 @@
 import { sqliteTable, text, integer, uniqueIndex } from "drizzle-orm/sqlite-core";
+import type { SellingPointPlan } from "@/lib/script-engine/selling-points";
 import type {
   CreativeIntent,
   ProductionSnapshot,
@@ -56,6 +57,7 @@ export const projects = sqliteTable("projects", {
 
 // Scripts table
 export const scripts = sqliteTable("scripts", {
+  sellingPointPlan: text("selling_point_plan", { mode: "json" }).$type<SellingPointPlan>(),
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
   version: integer("version").notNull().default(1),
@@ -401,6 +403,8 @@ export interface ScriptCharacter {
 }
 
 export interface Shot {
+  /** IDs from the script's saved selling-point brief. */
+  sellingPointIds?: string[];
   shotId: number;
   type: "hook" | "pain_point" | "product_reveal" | "demo" | "social_proof" | "cta";
   duration: number; // Seconds

@@ -29,6 +29,8 @@ import {
 } from "@/components/ui/select";
 import { useT, useLocale } from "@/lib/i18n";
 import { friendlyError } from "@/lib/friendly-error";
+import { ScriptGenerationProgressPanel } from "@/components/script-generation-progress";
+import { useScriptGeneration } from "@/lib/use-script-generation";
 
 // product category options (label changed to i18n key, converted via t() at render time)
 const categoryOptions = [
@@ -110,6 +112,7 @@ export default function NewProjectPage() {
 
   // check LLM API configuration status
   const { llm, setVisualLook } = useSettingsStore();
+  const scriptGeneration = useScriptGeneration(llm.model);
   const isLLMConfigured = llm.apiKey.length > 0;
 
   // form state
@@ -521,6 +524,7 @@ export default function NewProjectPage() {
 
     try {
       // step 1: create the project (get projectId first)
+      scriptGeneration.reset();
       setProgress({ step: "creating", percent: 15, message: t("progressCreating") });
       const projectRes = await fetch("/api/project", {
         method: "POST",
@@ -585,7 +589,7 @@ export default function NewProjectPage() {
             .join("\n")
         : undefined;
 
-      const scriptRes = await fetch("/api/llm/script", {
+      const scriptRes = await scriptGeneration.request("/api/llm/script", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -627,7 +631,10 @@ export default function NewProjectPage() {
       if (selectedTemplateId) {
         incrementUseCount(selectedTemplateId);
       }
-      if (!scriptRes.ok) throw new Error(t("errorScriptFailed"));
+      if (!scriptRes.ok) {
+        const failure = await scriptRes.json().catch(() => ({}));
+        throw new Error(failure.error || t("errorScriptFailed"));
+      }
 
       // step 4: done
       setProgress({ step: "done", percent: 100, message: t("progressDone") });
@@ -1679,7 +1686,7 @@ export default function NewProjectPage() {
           {/* submit button */}
           <div className="pt-2 pb-10">
             {/* error message */}
-            {error && (
+            {error && !scriptGeneration.progress?.error && (
               <div className="mb-4 p-3 rounded-lg bg-destructive/10 border border-destructive/20">
                 <p className="text-sm text-destructive flex items-center gap-2">
                   <LuCircleAlert className="w-4 h-4 shrink-0" />
@@ -1689,7 +1696,8 @@ export default function NewProjectPage() {
             )}
 
             {/* progress bar */}
-            {progress && (
+            {scriptGeneration.progress && <div className="mb-4"><ScriptGenerationProgressPanel progress={scriptGeneration.progress} /></div>}
+            {progress && !scriptGeneration.progress && (
               <div className="mb-4">
                 <div className="h-2 bg-muted/30 rounded-full overflow-hidden">
                   <div

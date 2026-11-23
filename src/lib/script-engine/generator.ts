@@ -18,6 +18,8 @@ import {
 import type { Shot, ScriptCharacter } from "@/lib/db/schema";
 import { createLLMClient, withLLMErrors, LLMRequestError, jsonModeParams } from "@/lib/llm-error";
 import { stripThinkBlocks } from "@/lib/llm-clean";
+import { scriptDraftLines, type ScriptProgressContext } from "@/lib/script-progress";
+import { SELLING_POINT_PROMPT, sellingPointMaterials, validateSellingPointPlan, type SellingPointPlan } from "./selling-points";
 
 // ==================== Type definitions ====================
 
@@ -41,6 +43,8 @@ export interface ScriptInput extends ScriptGenerationInput {
 
 /** Generated script result */
 export interface GeneratedScript {
+  /** Full selling-point brief, including points not used in this variant. */
+  sellingPointPlan?: SellingPointPlan;
   /** Script title */
   title: string;
   /** Script style */
@@ -226,6 +230,9 @@ function validateShot(shot: Partial<Shot>, index: number): Shot {
     prompt: shot.prompt || undefined,
     // Pass through LLM-generated extended fields (video mode) so they are not silently dropped
     ...(stockKeywords?.length && { stockKeywords }),
+    ...(Array.isArray(shot.sellingPointIds) && {
+      sellingPointIds: [...new Set(shot.sellingPointIds.filter((id): id is string => typeof id === "string"))],
+    }),
     ...(shot.characterId && { characterId: shot.characterId }),
     ...(validMotions.includes(shot.motion as NonNullable<Shot["motion"]>) && { motion: shot.motion }),
     ...(shot.textOverlay?.text && {
@@ -287,8 +294,8 @@ function validateScript(raw: Record<string, unknown>, fallbackStyleType: string)
 // ==================== Core functionality ====================
 
 /**
- * Non-streaming chat call with ONE parse-driven retry ("repair first, then re-ask" — the last
- * rung of the JSON-robustness ladder): when the reply survives transport but fails to parse — bad JSON,
+ * Chat call (streamed when progress is requested) with ONE parse-driven retry — the last
+ * rung of the JSON-robustness ladder: when the reply survives transport but fails to parse — bad JSON,
  * missing shots — the model gets its own output back plus the parse error and one chance to fix
  * it. Network/HTTP retries stay inside the SDK client; LLMRequestError parse failures are
  * capability verdicts ("this model can't write scripts"), not format slips, so they never retry.
@@ -299,22 +306,53 @@ export async function completeWithJsonRetry<T>(
   params: Omit<OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming, "stream">,
   cfg: { baseUrl?: string; apiKey?: string; model?: string },
   parse: (content: string) => T,
+  progress?: ScriptProgressContext,
 ): Promise<T> {
   let messages = params.messages;
   let lastErr: unknown;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const response = await withLLMErrors(
-      () => client.chat.completions.create({ ...params, messages }),
-      cfg,
-    );
-    const content = response.choices[0]?.message?.content;
+    progress?.signal.throwIfAborted();
+    progress?.emit({ type: "stage", stage: "connecting", model: params.model });
+    let content = "";
+    if (progress) {
+      // Consume only final-answer content; reasoning_content is deliberately ignored.
+      await withLLMErrors(async () => {
+        try {
+          const stream = await client.chat.completions.create({ ...params, messages, stream: true }, { signal: progress.signal });
+          let lastPreview = 0;
+          for await (const chunk of stream) {
+            const delta = chunk.choices[0]?.delta?.content;
+            if (!delta) continue;
+            if (!content) progress.emit({ type: "stage", stage: "writing" });
+            content += delta;
+            if (Date.now() - lastPreview >= 150) {
+              progress.emit({ type: "preview", lines: scriptDraftLines(content) });
+              lastPreview = Date.now();
+            }
+          }
+        } catch (error) {
+          const e = error as { status?: number; message?: string };
+          if (content || ![400, 422].includes(e.status ?? 0) || !/\bstream\b/i.test(e.message ?? "")) throw error;
+          progress.emit({ type: "stage", stage: "buffering" });
+          const response = await client.chat.completions.create({ ...params, messages }, { signal: progress.signal });
+          content = response.choices[0]?.message?.content ?? "";
+        }
+      }, cfg);
+      progress.emit({ type: "preview", lines: scriptDraftLines(content) });
+    } else {
+      const response = await withLLMErrors(() => client.chat.completions.create({ ...params, messages }), cfg);
+      content = response.choices[0]?.message?.content ?? "";
+    }
     if (!content) throw new Error("LLM 未返回有效内容");
+    progress?.emit({ type: "stage", stage: "validating" });
     try {
       return parse(content);
     } catch (err) {
       if (err instanceof LLMRequestError) throw err;
       lastErr = err;
       if (attempt === 0) {
+        progress?.emit({ type: "stage", stage: "repairing" });
+        progress?.emit({ type: "preview", lines: [] });
         const detail = (err instanceof Error ? err.message : String(err)).slice(0, 300);
         messages = [
           ...messages,
@@ -335,9 +373,33 @@ export async function completeWithJsonRetry<T>(
  * @param input - Script generation input parameters
  * @returns Array of generated scripts
  */
-export async function generateScript(input: ScriptInput): Promise<GeneratedScript[]> {
+export async function generateScript(input: ScriptInput, progress?: ScriptProgressContext): Promise<GeneratedScript[]> {
   const client = createClient(input.llmConfig);
-  const userPrompt = buildBatchPrompt(input, batchCountFor(input.llmConfig.baseUrl));
+  // Plan once for the batch. No three-point truncation: unused points remain visible in every variant.
+  const planningProgress: ScriptProgressContext | undefined = progress && {
+    signal: progress.signal,
+    emit: (event) => {
+      if (event.type === "stage") progress.emit({ type: "stage", stage: "selling_points", model: input.llmConfig.model });
+    },
+  };
+  const sellingPointPlan = await completeWithJsonRetry(
+    client,
+    {
+      model: input.llmConfig.model,
+      messages: [
+        { role: "system", content: SELLING_POINT_PROMPT },
+        { role: "user", content: JSON.stringify(sellingPointMaterials(input)) },
+      ],
+      temperature: 0.3,
+      max_tokens: 6000,
+      ...reasoningParams(input.llmConfig.baseUrl),
+      ...jsonModeParams(input.llmConfig.baseUrl),
+    },
+    input.llmConfig,
+    (content) => validateSellingPointPlan(JSON.parse(extractJSON(content)), input),
+    planningProgress,
+  );
+  const userPrompt = buildBatchPrompt({ ...input, sellingPointPlan }, batchCountFor(input.llmConfig.baseUrl));
 
   // Transient free-endpoint failures retry inside the client; unparseable replies retry once with
   // the parse error echoed back. json_object mode is safe here: the batch prompt's top level is
@@ -356,7 +418,16 @@ export async function generateScript(input: ScriptInput): Promise<GeneratedScrip
       ...jsonModeParams(input.llmConfig.baseUrl),
     },
     input.llmConfig,
-    (content) => parseScriptResponse(content, input.styleType),
+    (content) => parseScriptResponse(content, input.styleType).map((script) => ({
+      ...script,
+      sellingPointPlan,
+      shots: script.shots.map((shot) => ({
+        ...shot,
+        sellingPointIds: (shot.sellingPointIds ?? []).filter((id) =>
+          sellingPointPlan.sellingPoints.some((point) => point.id === id && point.source !== "inferred")),
+      })),
+    })),
+    progress,
   );
 }
 
@@ -372,7 +443,7 @@ export interface TopicScriptGenInput extends TopicScriptInput {
  * @param input - Topic + LLM config
  * @returns Array of generated scripts (includes stockKeywords, ready to feed directly into stock-fill for media matching)
  */
-export async function generateTopicScript(input: TopicScriptGenInput): Promise<GeneratedScript[]> {
+export async function generateTopicScript(input: TopicScriptGenInput, progress?: ScriptProgressContext): Promise<GeneratedScript[]> {
   const client = createClient(input.llmConfig);
   const userPrompt = buildTopicBatchPrompt(input, batchCountFor(input.llmConfig.baseUrl, input.count ?? 3));
 
@@ -392,6 +463,7 @@ export async function generateTopicScript(input: TopicScriptGenInput): Promise<G
     },
     input.llmConfig,
     (content) => parseScriptResponse(content, "custom"),
+    progress,
   );
 }
 

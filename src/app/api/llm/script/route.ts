@@ -11,6 +11,8 @@ import { scripts as scriptsTable, projects, publishMetrics } from "@/lib/db/sche
 import { eq } from "drizzle-orm";
 import { apiError, errText } from "@/lib/api-error";
 import { llmErrorPair } from "@/lib/llm-error";
+import { scriptProgressResponse } from "@/lib/script-progress-server";
+import type { ScriptProgressContext } from "@/lib/script-progress";
 import { topConvertingStyle, topConvertingHook, buildPerformanceHint, type MetricInput } from "@/lib/performance-insights";
 
 /** Allowed enum values for the styleType column in the scripts table */
@@ -129,6 +131,10 @@ async function loadInsights(category: string): Promise<{ hint: string; topStyle:
 
 // Generate commerce script
 export async function POST(req: NextRequest) {
+  return scriptProgressResponse(req, (progress) => generate(req, progress));
+}
+
+async function generate(req: NextRequest, progress?: ScriptProgressContext) {
   const body = await req.json();
   const {
     productImages,
@@ -160,6 +166,7 @@ export async function POST(req: NextRequest) {
     // Product image analysis: convert local paths to base64 before passing to the vision model
     let analysis = body.productAnalysis;
     if (!analysis && productImages?.length > 0 && llmConfig) {
+      progress?.emit({ type: "stage", stage: "analyzing", model: llmConfig.visionModel || llmConfig.model });
       try {
         const imageUrls = await Promise.all(
           (productImages as string[]).map(imagePathToBase64)
@@ -203,12 +210,14 @@ export async function POST(req: NextRequest) {
           ? body.preferredHookId
           : undefined,
       llmConfig,
-    });
+    }, progress);
 
     // Persist: write generated scripts to the scripts table so the script/assets pages can read them by projectId
     let savedScripts = scripts;
     const projectId = body.projectId;
     if (projectId) {
+      progress?.signal.throwIfAborted();
+      progress?.emit({ type: "stage", stage: "saving" });
       const db = getDb();
       // Refuse to overwrite a one-liner topic project with a commerce script (contentType mismatch — would delete its topic scripts)
       const proj = await db
@@ -222,42 +231,45 @@ export async function POST(req: NextRequest) {
         );
       }
       try {
-        // Delete existing scripts for this project first (overwrite on regenerate)
-        await db.delete(scriptsTable).where(eq(scriptsTable.projectId, projectId));
-        const rows = await db
-          .insert(scriptsTable)
-          .values(
-            scripts.map((s, i) => ({
-              projectId,
-              version: 1,
-              styleType: (VALID_SCRIPT_STYLE.has(s.styleType) ? s.styleType : "custom") as
-                | "pain_point" | "scene" | "comparison" | "story"
-                | "drama" | "reversal" | "interview" | "unboxing" | "product_pov" | "talking_head"
-                | "custom",
-              title: s.title,
-              totalDuration: s.totalDuration,
-              shots: s.shots,
-              // dialogue-script cast (drama style) — read back at compose time for multi-voice TTS
-              ...(s.characters?.length && { characters: s.characters }),
-              selected: i === 0, // select the first script set by default
-            }))
-          )
-          .returning();
+        // Save the brief and variants atomically: failed regeneration keeps the old scripts.
+        const rows = db.transaction((tx) => {
+          tx.delete(scriptsTable).where(eq(scriptsTable.projectId, projectId)).run();
+          const inserted = tx
+            .insert(scriptsTable)
+            .values(
+              scripts.map((s, i) => ({
+                projectId,
+                version: 1,
+                styleType: (VALID_SCRIPT_STYLE.has(s.styleType) ? s.styleType : "custom") as
+                  | "pain_point" | "scene" | "comparison" | "story"
+                  | "drama" | "reversal" | "interview" | "unboxing" | "product_pov" | "talking_head"
+                  | "custom",
+                title: s.title,
+                sellingPointPlan: s.sellingPointPlan,
+                totalDuration: s.totalDuration,
+                shots: s.shots,
+                // dialogue-script cast (drama style) — read back at compose time for multi-voice TTS
+                ...(s.characters?.length && { characters: s.characters }),
+                selected: i === 0, // select the first script set by default
+              }))
+            )
+            .returning().all();
+          tx.update(projects)
+            .set({ status: "scripting", ...(analysis && { productAnalysis: analysis }), updatedAt: new Date() })
+            .where(eq(projects.id, projectId)).run();
+          return inserted;
+        });
         savedScripts = rows.map((r) => ({
           id: r.id,
           title: r.title ?? "",
+          sellingPointPlan: r.sellingPointPlan ?? undefined,
           styleType: r.styleType,
           totalDuration: r.totalDuration ?? 0,
           shots: r.shots ?? [],
           selected: r.selected ?? false,
         })) as typeof scripts;
-        // Sync project status and analysis result
-        await db
-          .update(projects)
-          .set({ status: "scripting", ...(analysis && { productAnalysis: analysis }), updatedAt: new Date() })
-          .where(eq(projects.id, projectId));
       } catch (e) {
-        // DB write failure must surface as an error — returning 200 would let the frontend navigate away thinking it succeeded, then read empty scripts from the DB (which may already have had their old scripts deleted)
+        // Surface write failure; the transaction has preserved the previous scripts.
         console.error("脚本落库失败:", e);
         return NextResponse.json({ error: errText(req, "脚本落库失败，请重试", "Failed to save scripts to the database, please try again"), projectId }, { status: 500 });
       }

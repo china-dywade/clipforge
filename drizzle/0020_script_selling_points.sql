@@ -1,0 +1,1 @@
+ALTER TABLE `scripts` ADD `selling_point_plan` text;

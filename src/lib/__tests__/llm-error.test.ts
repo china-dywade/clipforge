@@ -81,6 +81,47 @@ describe("freePoolRetryFetch（把免费池 402 翻译成 SDK 认识的 x-should
 });
 
 describe("createLLMClient（重试交给 openai SDK，不自研）", () => {
+  it("脚本生成兼容同时拒绝 max_tokens 和非默认 temperature 的模型", async () => {
+    const requests: Record<string, unknown>[] = [];
+    const server = createServer(async (req, res) => {
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      const body = JSON.parse(raw) as Record<string, unknown>;
+      requests.push(body);
+      const message = body.max_tokens !== undefined
+        ? "Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead."
+        : body.temperature !== undefined
+          ? "Unsupported value: 'temperature' does not support 0.85 with this model. Only the default (1) value is supported."
+          : undefined;
+      res.writeHead(message ? 400 : 200, { "content-type": "application/json" });
+      res.end(JSON.stringify(message
+        ? { error: { message, type: "invalid_request_error" } }
+        : { id: "test", choices: [{ index: 0, message: { role: "assistant", content: '{"scripts":[]}' }, finish_reason: "stop" }] }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const client = createLLMClient({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "test-key" });
+      const result = await client.chat.completions.create({
+        model: "reasoning-model",
+        messages: [{ role: "user", content: "Return JSON" }],
+        temperature: 0.85,
+        max_tokens: 16000,
+        response_format: { type: "json_object" },
+      });
+      expect(result.choices[0].message.content).toBe('{"scripts":[]}');
+      expect(requests.at(-1)).toMatchObject({
+        max_completion_tokens: 16000,
+        response_format: { type: "json_object" },
+        messages: [{ role: "user", content: "Return JSON" }],
+      });
+      expect(requests.at(-1)).not.toHaveProperty("temperature");
+      expect(requests.length).toBeLessThanOrEqual(4);
+    } finally {
+      server.close();
+    }
+  });
+
   it("免 Key 端点补占位 Key（SDK 要求非空），并放开重试次数", () => {
     const client = createLLMClient({ baseUrl: NEW_POLLINATIONS, apiKey: "", model: "openai-fast" });
     expect(client.apiKey).toBe("no-key");
@@ -207,6 +248,17 @@ describe("explainLLMStatus（每种失败都要说出下一步该做什么）", 
 });
 
 describe("explainLLMError（SDK 错误类 → 文案，含无状态码的连接层失败）", () => {
+  it("OpenAI 连接失败只提示服务端网络，不误导用户启动 Ollama", () => {
+    const conn = explainLLMError(new APIConnectionError({ message: "Connection error." }), {
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-6-astra",
+    });
+    expect(conn.zh).toContain("服务端网络/代理");
+    expect(conn.zh).toContain("https://api.openai.com/v1");
+    expect(conn.zh).not.toContain("Ollama");
+    expect(conn.en).not.toContain("ollama serve");
+  });
+
   it("连接失败/超时走 SDK 的连接错误类，提示网络与本地 Ollama", () => {
     const conn = explainLLMError(new APIConnectionError({ message: "fetch failed" }), {
       baseUrl: "http://localhost:11434/v1",

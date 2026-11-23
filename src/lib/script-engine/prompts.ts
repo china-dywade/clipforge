@@ -680,6 +680,8 @@ export const PRODUCT_ANALYSIS_PROMPT = `你是一位专业的电商选品分析�
 
 /** Input parameters for script generation */
 export interface ScriptGenerationInput {
+  /** Complete selling-point brief shared across generated variants. */
+  sellingPointPlan?: import("./selling-points").SellingPointPlan;
   /** product name */
   productName: string;
   /** product category */
@@ -788,6 +790,14 @@ export function buildUserPrompt(input: ScriptGenerationInput): string {
   if (productAnalysis) {
     parts.push(`\n【商品图片分析结果】`);
     parts.push(productAnalysis);
+  }
+
+  if (input.sellingPointPlan) {
+    parts.push(`\n【卖点整理与分镜关联】\n${JSON.stringify(input.sellingPointPlan)}
+上述清单是本次脚本的卖点依据。围绕一个主卖点展开，按时长挑选辅助卖点，不要强行把全部卖点塞进一条短视频。
+每个分镜必须输出 sellingPointIds 数组，填写该镜头台词或画面实际表达的卖点 id（例如 ["sp1"]）；不涉及卖点则 []。未采用的卖点仍会展示给用户，不需要凑镜头。
+source=provided 仅表示用户资料提供，并不代表独立核验；source=image 的内容须保守表达，不得根据外观推断功效；source=inferred 是待确认信息，不得作为事实写入台词、画面或关联。
+不得新增清单和资料中没有的数字、价格、效果或竞品优势。coreMessage、visualIdea 是创作建议，不是额外事实证据。`);
   }
 
   // inject on-screen character constraints

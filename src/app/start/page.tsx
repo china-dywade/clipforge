@@ -12,6 +12,8 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useSettingsStore } from "@/lib/stores/settings-store";
+import { ScriptGenerationProgressPanel } from "@/components/script-generation-progress";
+import { useScriptGeneration } from "@/lib/use-script-generation";
 import { ProductionProfilePicker } from "@/components/production-profile-picker";
 import { useProductLibraryStore } from "@/lib/stores/product-library-store";
 import { useCharacterStore } from "@/lib/stores/project-store";
@@ -64,6 +66,7 @@ export default function StartPage() {
   const t = useT("start");
   const locale = useLocale();
   const { llm } = useSettingsStore();
+  const scriptGeneration = useScriptGeneration(llm.model);
   const applyAtlasOneKey = useSettingsStore((s) => s.applyAtlasOneKey);
   const llmReady = llm.apiKey.trim().length > 0;
   // example products follow the UI language
@@ -361,13 +364,13 @@ export default function StartPage() {
   const startTopic = async () => {
     setStageIdx(0);
     setStage(t("stageScript"));
-    const res = await fetch("/api/topic/script", {
+    const res = await scriptGeneration.request("/api/topic/script", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ topic: topic.trim(), narrationStyle: "knowledge", targetDuration: 25, llmConfig: llmConfig() }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok && !data.projectId) throw new Error(data.error || t("errTopicScript"));
+    if (!res.ok) throw new Error(data.error || t("errTopicScript"));
     router.push(`/project/${data.projectId}/script?auto=1${genQuery()}`);
   };
 
@@ -401,7 +404,7 @@ export default function StartPage() {
 
     setStageIdx(2);
     setStage(t("stageScript"));
-    const scriptRes = await fetch("/api/llm/script", {
+    const scriptRes = await scriptGeneration.request("/api/llm/script", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -438,8 +441,7 @@ export default function StartPage() {
     const p = data.product || {};
     setStageIdx(1);
     setStage(t("stageScript"));
-    // even if script gen fails, the project exists with product data — the script page offers retry
-    await fetch("/api/llm/script", {
+    const scriptRes = await scriptGeneration.request("/api/llm/script", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -455,11 +457,16 @@ export default function StartPage() {
         ...(creationCharacter() && { character: creationCharacter() }),
       }),
     });
+    if (!scriptRes.ok) {
+      const failure = await scriptRes.json().catch(() => ({}));
+      throw new Error(failure.error || t("errScript"));
+    }
     router.push(`/project/${data.projectId}/script?auto=1${genQuery()}`);
   };
 
   // actually run generation (shared by all modes); restore busy/stage on failure
   const runGeneration = async () => {
+    scriptGeneration.reset();
     setBusy(true);
     setError(null);
     try {
@@ -690,6 +697,7 @@ export default function StartPage() {
                   ))}
                 </div>
                 <div className="cf-prog-hint">{t("progHint")}</div>
+                <div className="mt-5 w-full"><ScriptGenerationProgressPanel progress={scriptGeneration.progress} /></div>
               </div>
             ) : (
               <>
@@ -840,7 +848,8 @@ export default function StartPage() {
               </button>
               <div className="cf-reassure">{t("reassureLead")}<b>Atlas Cloud</b>{t("reassureTail")}</div>
             </div>
-            {error && <div className="cf-err">{error}</div>}
+            {error && !scriptGeneration.progress?.error && <div className="cf-err">{error}</div>}
+            {scriptGeneration.progress?.status === "error" && <div className="mt-5"><ScriptGenerationProgressPanel progress={scriptGeneration.progress} /></div>}
               </>
             )}
           </div>
